@@ -4,19 +4,26 @@ import os
 import time
 import threading
 import signal
-from PIL import Image, ImageChops
+from PIL import Image, ImageEnhance
+import pytesseract
+import io
+import numpy as np
+from skimage.metrics import structural_similarity as ssim
 
 # Configuración específica para Termux
-ruta_referencia_android = "/storage/emulated/0/dat/referencia_roi.png"  # Ruta de la imagen de referencia en el dispositivo Android
-R_ROI = (902, 1489, 948, 1532)  # Región de interés (ROI)
-TOUCH_COORDS = (927, 1511)
-INITIAL_TAP_COORDS = (796, 1348)
+pytesseract.pytesseract.tesseract_cmd = 'tesseract'  # Ajustado para Termux
 
 # Variables de estado
 detectando = True
 ejecutando = True
 ruta_archivo_ed = os.path.expanduser("~/storage/shared/dat/ed.txt")  # Ruta ajustada para Termux
 ruta_archivo_sel = os.path.expanduser("~/storage/shared/dat/sel.txt")  # Nueva ruta para sel.txt
+ruta_imagen_referencia = "/storage/emulated/0/dat/referencia_roi.png"  # Ruta a la imagen de referencia
+
+# Región de interés (ROI) para detectar "1"
+R_ROI = (902, 1489, 948, 1532)
+TOUCH_COORDS = (927, 1511)
+INITIAL_TAP_COORDS = (796, 1348)
 
 def verificar_archivo_existe(ruta_archivo):
     """Verifica si un archivo existe en el sistema de archivos local"""
@@ -34,8 +41,12 @@ def eliminar_archivo(ruta_archivo):
 def capturar_pantalla_optimizado():
     """Captura la pantalla directamente en memoria usando ADB"""
     try:
+        start_time = time.time()
         result = subprocess.run(['adb', 'exec-out', 'screencap', '-p'],
                                capture_output=True, check=True)
+        end_time = time.time()
+        tiem = end_time - start_time
+        print(f"Captura en {tiem:.4f} segundos.")
         if result.stdout:
             return Image.open(io.BytesIO(result.stdout))
         return None
@@ -43,37 +54,37 @@ def capturar_pantalla_optimizado():
         print(f"[Error] Al capturar pantalla: {e}")
         return None
 
-def cargar_referencia_android(ruta_referencia_android):
-    """Carga la imagen de referencia desde el dispositivo Android"""
+def procesar_imagen(img, roi_box):
+    """Procesa la imagen para mejorar la detección"""
     try:
-        # Copiar la imagen de referencia desde el dispositivo Android a la computadora temporalmente
-        ruta_temporal_local = "temp_referencia.png"
-        subprocess.run(['adb', 'pull', ruta_referencia_android, ruta_temporal_local], check=True)
-        referencia = Image.open(ruta_temporal_local)
-        os.remove(ruta_temporal_local)  # Eliminar el archivo temporal después de cargarlo
-        return referencia
+        cropped = img.crop(roi_box)
+        enhanced = ImageEnhance.Contrast(cropped).enhance(3.5).convert('L')
+        return enhanced
     except Exception as e:
-        print(f"[Error] Al cargar imagen de referencia: {e}")
+        print(f"[Error] Al procesar imagen: {e}")
         return None
 
-def imagenes_iguales(img1, img2, umbral=5):
-    """
-    Compara dos imágenes usando histogramas de Pillow.
-    
-    Args:
-        img1, img2: Imágenes en formato PIL.
-        umbral: Umbral de diferencia permitida.
-    
-    Returns:
-        bool: True si las imágenes son similares, False en caso contrario.
-    """
-    if img1.size != img2.size:
-        return False
-    diferencia = ImageChops.difference(img1, img2)
-    histograma = diferencia.histogram()
-    total_pixeles = sum(histograma)
-    suma_diferencias = sum(i * count for i, count in enumerate(histograma))
-    return (suma_diferencias / total_pixeles) < umbral
+def comparar_imagenes(img1, img2):
+    """Compara dos imágenes y devuelve el porcentaje de similitud"""
+    try:
+        # Convertir las imágenes a arrays de numpy
+        img1_array = np.array(img1)
+        img2_array = np.array(img2)
+        
+        # Asegurar que ambas imágenes tengan el mismo tamaño
+        if img1_array.shape != img2_array.shape:
+            img2 = img2.resize(img1.size)
+            img2_array = np.array(img2)
+        
+        # Calcular la similitud estructural
+        score, _ = ssim(img1_array, img2_array, full=True)
+        
+        # Convertir a porcentaje
+        similitud_porcentaje = score * 100
+        return similitud_porcentaje
+    except Exception as e:
+        print(f"[Error] Al comparar imágenes: {e}")
+        return 0
 
 def tocar_pantalla(coords):
     """Toca la pantalla en las coordenadas especificadas usando ADB"""
@@ -135,15 +146,18 @@ def verificar_archivo_deteccion():
             time.sleep(1)
 
 def detectar_1_y_acciones():
-    """Detecta el número '1' comparando imágenes y ejecuta acciones"""
+    """Detecta el número '1' mediante comparación de imágenes y ejecuta acciones"""
     global detectando, ejecutando
     try:
         # Cargar la imagen de referencia
-        referencia = cargar_referencia_android(ruta_referencia_android)
-        if referencia is None:
-            print("[Error] No se pudo cargar la imagen de referencia. Finalizando...")
+        if not os.path.exists(ruta_imagen_referencia):
+            print(f"[ERROR] No se encontró la imagen de referencia en {ruta_imagen_referencia}")
+            ejecutando = False
             return
-
+            
+        imagen_referencia = Image.open(ruta_imagen_referencia).convert('L')
+        print(f"[INFO] Imagen de referencia cargada desde {ruta_imagen_referencia}")
+        
         while ejecutando:
             inicio_iteracion = time.time()  # Marca el inicio de la iteración
             if detectando:
@@ -151,15 +165,21 @@ def detectar_1_y_acciones():
                 print(f"[ACCIÓN] Tocando pantalla en {INITIAL_TAP_COORDS}")
                 tocar_pantalla(INITIAL_TAP_COORDS)
 
-                # Capturar pantalla y recortar ROI
+                # Capturar pantalla y procesar imagen
                 img = capturar_pantalla_optimizado()
                 if not img:
                     continue
-                roi_actual = img.crop(R_ROI)
+                processed_img = procesar_imagen(img, R_ROI)
+                if not processed_img:
+                    continue
+                
+                # Comparar la imagen procesada con la imagen de referencia
+                similitud = comparar_imagenes(processed_img, imagen_referencia)
+                print(f"[INFO] Porcentaje de similitud: {similitud:.2f}%")
 
-                # Comparar la ROI actual con la referencia
-                if imagenes_iguales(roi_actual, referencia):
-                    print("[ACCIÓN] Detectado '1' mediante comparación de imágenes")
+                # Acciones si la similitud es superior al 95%
+                if similitud > 95:
+                    print(f"[ACCIÓN] Detectada coincidencia con {similitud:.2f}% de similitud")
                     # Enviar alerta en paralelo
                     threading.Thread(target=enviar_alerta, daemon=True).start()
                     # Esperar 0.65 segundos
@@ -174,6 +194,7 @@ def detectar_1_y_acciones():
             fin_iteracion = time.time()  # Marca el final de la iteración
             tiempo_iteracion = fin_iteracion - inicio_iteracion
             print(f"[INFO] Tiempo total de la iteración: {tiempo_iteracion:.4f} segundos")
+
 
     except Exception as e:
         print(f"[Error] detectar_1_y_acciones(): {e}")
