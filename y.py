@@ -4,11 +4,9 @@ import os
 import time
 import threading
 import signal
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageChops, ImageStat
 import pytesseract
 import io
-import numpy as np
-from skimage.metrics import structural_similarity as ssim
 
 # Configuración específica para Termux
 pytesseract.pytesseract.tesseract_cmd = 'tesseract'  # Ajustado para Termux
@@ -65,22 +63,25 @@ def procesar_imagen(img, roi_box):
         return None
 
 def comparar_imagenes(img1, img2):
-    """Compara dos imágenes y devuelve el porcentaje de similitud"""
+    """Compara dos imágenes usando solo PIL y devuelve el porcentaje de similitud"""
     try:
-        # Convertir las imágenes a arrays de numpy
-        img1_array = np.array(img1)
-        img2_array = np.array(img2)
-        
         # Asegurar que ambas imágenes tengan el mismo tamaño
-        if img1_array.shape != img2_array.shape:
+        if img1.size != img2.size:
             img2 = img2.resize(img1.size)
-            img2_array = np.array(img2)
         
-        # Calcular la similitud estructural
-        score, _ = ssim(img1_array, img2_array, full=True)
+        # Calcular diferencia
+        diff = ImageChops.difference(img1, img2)
         
-        # Convertir a porcentaje
-        similitud_porcentaje = score * 100
+        # Calcular estadísticas de la diferencia
+        stat = ImageStat.Stat(diff)
+        
+        # Calcular valor medio de diferencia (0-255)
+        mean_diff = sum(stat.mean) / len(stat.mean)
+        
+        # Convertir a porcentaje de similitud (0-100)
+        # 0 diferencia = 100% similitud, 255 diferencia = 0% similitud
+        similitud_porcentaje = 100 - (mean_diff * 100 / 255)
+        
         return similitud_porcentaje
     except Exception as e:
         print(f"[Error] Al comparar imágenes: {e}")
