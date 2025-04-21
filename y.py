@@ -4,23 +4,20 @@ import os
 import time
 import threading
 import signal
-from PIL import Image, ImageEnhance
-import pytesseract
-import io
+from PIL import Image, ImageChops
+import numpy as np
 
 # Configuración específica para Termux
-pytesseract.pytesseract.tesseract_cmd = 'tesseract'  # Ajustado para Termux
+ruta_referencia_android = "/storage/emulated/0/dat/referencia_roi.png"  # Ruta de la imagen de referencia en el dispositivo Android
+R_ROI = (902, 1489, 948, 1532)  # Región de interés (ROI)
+TOUCH_COORDS = (927, 1511)
+INITIAL_TAP_COORDS = (796, 1348)
 
 # Variables de estado
 detectando = True
 ejecutando = True
 ruta_archivo_ed = os.path.expanduser("~/storage/shared/dat/ed.txt")  # Ruta ajustada para Termux
 ruta_archivo_sel = os.path.expanduser("~/storage/shared/dat/sel.txt")  # Nueva ruta para sel.txt
-
-# Región de interés (ROI) para detectar "1"
-R_ROI = (902, 1489, 948, 1532)
-TOUCH_COORDS = (927, 1511)
-INITIAL_TAP_COORDS = (796, 1348)
 
 def verificar_archivo_existe(ruta_archivo):
     """Verifica si un archivo existe en el sistema de archivos local"""
@@ -38,12 +35,8 @@ def eliminar_archivo(ruta_archivo):
 def capturar_pantalla_optimizado():
     """Captura la pantalla directamente en memoria usando ADB"""
     try:
-        start_time = time.time()
         result = subprocess.run(['adb', 'exec-out', 'screencap', '-p'],
                                capture_output=True, check=True)
-        end_time = time.time()
-        tiem = end_time - start_time
-        print(f"Captura en {tiem:.4f} segundos.")
         if result.stdout:
             return Image.open(io.BytesIO(result.stdout))
         return None
@@ -51,26 +44,35 @@ def capturar_pantalla_optimizado():
         print(f"[Error] Al capturar pantalla: {e}")
         return None
 
-def procesar_imagen(img, roi_box):
-    """Procesa la imagen para mejorar la detección de OCR"""
+def cargar_referencia_android(ruta_referencia_android):
+    """Carga la imagen de referencia desde el dispositivo Android"""
     try:
-        cropped = img.crop(roi_box)
-        enhanced = ImageEnhance.Contrast(cropped).enhance(3.5).convert('L')
-        binary = enhanced.point(lambda x: 0 if x < 140 else 255, '1')
-        return binary
+        # Copiar la imagen de referencia desde el dispositivo Android a la computadora temporalmente
+        ruta_temporal_local = "temp_referencia.png"
+        subprocess.run(['adb', 'pull', ruta_referencia_android, ruta_temporal_local], check=True)
+        referencia = Image.open(ruta_temporal_local)
+        os.remove(ruta_temporal_local)  # Eliminar el archivo temporal después de cargarlo
+        return referencia
     except Exception as e:
-        print(f"[Error] Al procesar imagen: {e}")
+        print(f"[Error] Al cargar imagen de referencia: {e}")
         return None
 
-def realizar_ocr(img):
-    """Realiza OCR en la imagen procesada"""
-    try:
-        config = '--psm 10 -c tessedit_char_whitelist=0123456789'
-        extracted_text = pytesseract.image_to_string(img, config=config)
-        return ''.join(filter(str.isdigit, extracted_text))
-    except Exception as e:
-        print(f"[Error] En OCR: {e}")
-        return ""
+def imagenes_iguales(img1, img2, umbral=5):
+    """
+    Compara dos imágenes usando la diferencia absoluta de píxeles.
+    
+    Args:
+        img1, img2: Imágenes en formato PIL.
+        umbral: Umbral de diferencia permitida.
+    
+    Returns:
+        bool: True si las imágenes son similares, False en caso contrario.
+    """
+    if img1.size != img2.size:
+        return False
+    diferencia = ImageChops.difference(img1, img2)
+    datos = np.array(diferencia)
+    return np.mean(datos) < umbral
 
 def tocar_pantalla(coords):
     """Toca la pantalla en las coordenadas especificadas usando ADB"""
@@ -132,9 +134,15 @@ def verificar_archivo_deteccion():
             time.sleep(1)
 
 def detectar_1_y_acciones():
-    """Detecta el número '1' y ejecuta acciones"""
+    """Detecta el número '1' comparando imágenes y ejecuta acciones"""
     global detectando, ejecutando
     try:
+        # Cargar la imagen de referencia
+        referencia = cargar_referencia_android(ruta_referencia_android)
+        if referencia is None:
+            print("[Error] No se pudo cargar la imagen de referencia. Finalizando...")
+            return
+
         while ejecutando:
             inicio_iteracion = time.time()  # Marca el inicio de la iteración
             if detectando:
@@ -142,19 +150,15 @@ def detectar_1_y_acciones():
                 print(f"[ACCIÓN] Tocando pantalla en {INITIAL_TAP_COORDS}")
                 tocar_pantalla(INITIAL_TAP_COORDS)
 
-                # Capturar pantalla y procesar imagen
+                # Capturar pantalla y recortar ROI
                 img = capturar_pantalla_optimizado()
                 if not img:
                     continue
-                processed_img = procesar_imagen(img, R_ROI)
-                if not processed_img:
-                    continue
-                extracted_digits = realizar_ocr(processed_img)
-                print(f"[INFO] Número detectado: {extracted_digits}")
+                roi_actual = img.crop(R_ROI)
 
-                # Acciones si se detecta el "1"
-                if extracted_digits == "1":
-                    print("[ACCIÓN] Detectado '1'")
+                # Comparar la ROI actual con la referencia
+                if imagenes_iguales(roi_actual, referencia):
+                    print("[ACCIÓN] Detectado '1' mediante comparación de imágenes")
                     # Enviar alerta en paralelo
                     threading.Thread(target=enviar_alerta, daemon=True).start()
                     # Esperar 0.65 segundos
@@ -169,7 +173,6 @@ def detectar_1_y_acciones():
             fin_iteracion = time.time()  # Marca el final de la iteración
             tiempo_iteracion = fin_iteracion - inicio_iteracion
             print(f"[INFO] Tiempo total de la iteración: {tiempo_iteracion:.4f} segundos")
-
 
     except Exception as e:
         print(f"[Error] detectar_1_y_acciones(): {e}")
