@@ -5,7 +5,6 @@ import time
 import threading
 import signal
 from PIL import Image, ImageChops
-import numpy as np
 
 # Configuración específica para Termux
 ruta_referencia_android = "/storage/emulated/0/dat/referencia_roi.png"  # Ruta de la imagen de referencia en el dispositivo Android
@@ -59,7 +58,7 @@ def cargar_referencia_android(ruta_referencia_android):
 
 def imagenes_iguales(img1, img2, umbral=5):
     """
-    Compara dos imágenes usando la diferencia absoluta de píxeles.
+    Compara dos imágenes usando histogramas de Pillow.
     
     Args:
         img1, img2: Imágenes en formato PIL.
@@ -71,8 +70,10 @@ def imagenes_iguales(img1, img2, umbral=5):
     if img1.size != img2.size:
         return False
     diferencia = ImageChops.difference(img1, img2)
-    datos = np.array(diferencia)
-    return np.mean(datos) < umbral
+    histograma = diferencia.histogram()
+    total_pixeles = sum(histograma)
+    suma_diferencias = sum(i * count for i, count in enumerate(histograma))
+    return (suma_diferencias / total_pixeles) < umbral
 
 def tocar_pantalla(coords):
     """Toca la pantalla en las coordenadas especificadas usando ADB"""
